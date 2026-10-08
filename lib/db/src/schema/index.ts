@@ -56,3 +56,10 @@ export const analyticsTable = pgTable("analytics", {
   historicalRevenue: real("historical_revenue").notNull(),
   daily: jsonb("daily").$type<AnalyticsDay[]>().notNull(),
 });
+
+// Real traffic counters, one row per day (IST), written by /analytics/events.
+export const analyticsDailyTable = pgTable("analytics_daily", {
+  day: text("day").primaryKey(), // YYYY-MM-DD (Asia/Kolkata)
+  visits: integer("visits").notNull().default(0),
+  clicks: integer("clicks").notNull().default(0),
+});
