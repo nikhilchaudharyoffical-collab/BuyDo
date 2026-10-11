@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type TouchEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type TouchEvent } from "react";
 import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { Route, Switch, useLocation, Router as WouterRouter } from "wouter";
 import {
@@ -21,6 +21,7 @@ import {
   Pencil,
   Percent,
   Plus,
+  Printer,
   RefreshCcw,
   Search,
   ShieldCheck,
@@ -60,7 +61,7 @@ import {
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
-import { AdminDashboard as BuyDoAdmin } from "@/admin/AdminApp";
+import { AdminApp as BuyDoAdmin } from "@/admin/AdminApp";
 import { ErrorBoundary } from "@/components/error-boundary";
 
 const queryClient = new QueryClient();
@@ -73,6 +74,19 @@ const getDeliveryDate = (days: number) => {
   const date = new Date();
   date.setDate(date.getDate() + days);
   return date.toISOString().slice(0, 10);
+};
+const getTrendText = (
+  daily: AnalyticsSummary["daily"],
+  metric: "visits" | "clicks" | "orders",
+) => {
+  if (!daily.length) return "Live from DB";
+  const latest = daily[daily.length - 1]?.[metric] ?? 0;
+  const previous = daily[daily.length - 2]?.[metric] ?? 0;
+  if (previous === 0) {
+    return latest > 0 ? "Fresh signal" : "No change";
+  }
+  const delta = ((latest - previous) / previous) * 100;
+  return `${delta >= 0 ? "+" : ""}${delta.toFixed(1)}% vs previous day`;
 };
 
 function AppHeader({ onMenu }: { onMenu?: () => void }) {
@@ -172,6 +186,66 @@ function ProductGallery({ product }: { product: Product }) {
   );
 }
 
+type InvoiceData = {
+  number: string | null;
+  date: Date;
+  name: string;
+  contact: string;
+  address: string;
+  product: Product;
+  quantity: number;
+  subtotal: number;
+  discount: number;
+  total: number;
+  payment: OrderInputPaymentMethod;
+  deliveryDate: string | Date;
+};
+
+const formatLongDate = (date: string | Date) =>
+  new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", year: "numeric" }).format(new Date(date));
+
+function InvoiceCard({ d }: { d: InvoiceData }) {
+  const isUpi = d.payment === OrderInputPaymentMethod.UPI;
+  return (
+    <div className="invoice invoice-printable">
+      <div className="invoice-head">
+        <div className="invoice-brand">
+          <span className="brand-mark"><Sparkles size={15} fill="currentColor" /></span>
+          <div><strong>BuyDo<span className="brand-dot">.</span></strong><small>Order invoice</small></div>
+        </div>
+        <div className="invoice-meta">
+          <span className={`invoice-badge ${d.number ? "placed" : "draft"}`}>{d.number ? "Order placed" : "Draft"}</span>
+          <strong>{d.number ? `#${d.number}` : "Invoice preview"}</strong>
+          <small>{formatLongDate(d.date)}</small>
+        </div>
+      </div>
+      <div className="invoice-parties">
+        <div><span className="field-label">Billed to</span><strong>{d.name}</strong><small>+91 {d.contact}</small></div>
+        <div><span className="field-label">Ship to</span><small className="invoice-address">{d.address}</small></div>
+      </div>
+      <div className="invoice-items">
+        <div className="invoice-items-head"><span>Item</span><span>Qty</span><span>Amount</span></div>
+        <div className="invoice-item">
+          <img src={d.product.images[0]} alt="" />
+          <div><strong>{d.product.name}</strong><small>{money(d.product.price)} each</small></div>
+          <span>{d.quantity}</span>
+          <strong>{money(d.subtotal)}</strong>
+        </div>
+      </div>
+      <dl className="invoice-totals">
+        <div><dt>Subtotal</dt><dd>{money(d.subtotal)}</dd></div>
+        {d.discount > 0 && <div className="save"><dt>UPI discount (1.5%)</dt><dd>−{money(d.discount)}</dd></div>}
+        <div><dt>Delivery</dt><dd className="free">Free</dd></div>
+        <div className="grand"><dt>Total payable</dt><dd>{money(d.total)}</dd></div>
+      </dl>
+      <div className="invoice-foot">
+        <span><Truck size={13} /> Delivery by <strong>{formatDate(d.deliveryDate)}</strong></span>
+        <span>{isUpi ? "Payment: UPI" : "Payment: Cash on delivery"}</span>
+      </div>
+    </div>
+  );
+}
+
 function PurchaseModal({
   product,
   onClose,
@@ -179,6 +253,7 @@ function PurchaseModal({
   product: Product;
   onClose: () => void;
 }) {
+  const [step, setStep] = useState<"details" | "payment">("details");
   const [quantity, setQuantity] = useState(1);
   const [payment, setPayment] = useState<OrderInputPaymentMethod>(OrderInputPaymentMethod.COD);
   const [name, setName] = useState("");
@@ -186,13 +261,19 @@ function PurchaseModal({
   const [address, setAddress] = useState("");
   const [confirmed, setConfirmed] = useState<Order | null>(null);
   const [justSelected, setJustSelected] = useState<OrderInputPaymentMethod | null>(null);
+  const modalRef = useRef<HTMLDivElement>(null);
   const createOrder = useCreateOrder();
   const trackEvent = useTrackAnalyticsEvent();
+  const isUpi = payment === OrderInputPaymentMethod.UPI;
   const subtotal = product.price * quantity;
   const UPI_DISCOUNT_RATE = 0.015; // 1.5% real discount applied when UPI is selected
-  const upiDiscount = payment === OrderInputPaymentMethod.UPI ? Math.round(subtotal * UPI_DISCOUNT_RATE) : 0;
+  const upiDiscount = isUpi ? Math.round(subtotal * UPI_DISCOUNT_RATE) : 0;
   const total = subtotal - upiDiscount;
-  const deliveryDate = getDeliveryDate(payment === OrderInputPaymentMethod.UPI ? 5 : 10);
+  const deliveryDate = getDeliveryDate(isUpi ? 5 : 10);
+
+  useEffect(() => {
+    modalRef.current?.scrollTo({ top: 0 });
+  }, [step, confirmed]);
 
   const selectPayment = (method: OrderInputPaymentMethod) => {
     setPayment(method);
@@ -200,8 +281,12 @@ function PurchaseModal({
     window.setTimeout(() => setJustSelected((current) => (current === method ? null : current)), 650);
   };
 
-  const submit = (event: FormEvent) => {
+  const goToPayment = (event: FormEvent) => {
     event.preventDefault();
+    setStep("payment");
+  };
+
+  const placeOrder = () => {
     createOrder.mutate(
       {
         data: {
@@ -213,7 +298,7 @@ function PurchaseModal({
           deliveryDate,
           customerName: name,
           customerContact: contact,
-           address,
+          address,
         } as OrderInput,
       },
       {
@@ -225,40 +310,87 @@ function PurchaseModal({
     );
   };
 
+  const stepLabels = ["Details", "Payment", "Confirmation"];
+  const currentStep = confirmed ? 2 : step === "payment" ? 1 : 0;
+
+  // Invoice shown on the payment step is a live preview; after the order it uses the server's final numbers.
+  const invoice: InvoiceData = confirmed
+    ? {
+        number: confirmed.id,
+        date: new Date(confirmed.createdAt),
+        name: confirmed.customerName,
+        contact: confirmed.customerContact,
+        address: confirmed.address,
+        product,
+        quantity: confirmed.quantity,
+        subtotal: product.price * confirmed.quantity,
+        discount: Math.max(0, product.price * confirmed.quantity - confirmed.total),
+        total: confirmed.total,
+        payment: confirmed.paymentMethod as OrderInputPaymentMethod,
+        deliveryDate: confirmed.deliveryDate,
+      }
+    : { number: null, date: new Date(), name, contact, address, product, quantity, subtotal, discount: upiDiscount, total, payment, deliveryDate };
+  const confirmedUpi = confirmed?.paymentMethod === OrderInputPaymentMethod.UPI;
+
   return (
     <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <div className={`purchase-modal ${confirmed ? "is-confirmed" : ""}`}>
+      <div ref={modalRef} className={`purchase-modal ${confirmed ? "is-confirmed" : ""}`}>
         <button className="modal-close" onClick={onClose} aria-label="Close checkout"><X size={18} /></button>
+
+        <ol className="co-steps" aria-label="Checkout progress">
+          {stepLabels.map((label, index) => (
+            <li key={label} className={index < currentStep ? "done" : index === currentStep ? "active" : ""}>
+              <span>{index < currentStep ? <Check size={11} /> : index + 1}</span>{label}
+            </li>
+          ))}
+        </ol>
+
         {confirmed ? (
           <div className="success-state">
             <div className="success-orbit"><div className="success-check"><Check size={34} /></div></div>
-            <span className="eyebrow green">Order secured</span>
+            <span className="eyebrow green">{confirmedUpi ? "Order placed · UPI selected" : "Order confirmed"}</span>
             <h2>You're all set, {confirmed.customerName.split(" ")[0]}.</h2>
-            <p>Your order <strong>#{confirmed.id}</strong> is confirmed. We'll get it moving right away.</p>
+            <p>Your order <strong>#{confirmed.id}</strong> has been placed. Keep the invoice below for your records.</p>
             <div className="success-delivery"><Truck size={19} /><span>Arriving by <strong>{formatDate(confirmed.deliveryDate)}</strong></span></div>
-            {confirmed.paymentMethod === OrderInputPaymentMethod.UPI && (
+
+            <div className={`confirm-pay ${confirmedUpi ? "upi" : "cod"}`}>
+              <span className="confirm-pay-icon">{confirmedUpi ? <CreditCard size={18} /> : <Package size={18} />}</span>
+              <div>
+                <strong>{confirmedUpi ? "UPI payment" : "Cash on delivery"}</strong>
+                <small>{confirmedUpi ? "Payment pending" : "Pay when your order arrives"}</small>
+              </div>
+              <b>{money(confirmed.total)}</b>
+            </div>
+
+            {confirmedUpi && (
               <div className="success-offers">
                 <span className="success-offers-title">Offers you unlocked</span>
-                <div className="success-offer-row"><Percent size={14} /><span>1.5% UPI discount applied</span><strong>−{money(upiDiscount)}</strong></div>
+                <div className="success-offer-row"><Percent size={14} /><span>1.5% UPI discount applied</span><strong>−{money(invoice.discount)}</strong></div>
                 <div className="success-offer-row"><Truck size={14} /><span>Fast-track delivery</span><strong>5 days</strong></div>
                 <div className="success-offer-row"><Gift size={14} /><span>Cashback credited soon</span><strong>₹50</strong></div>
               </div>
             )}
-            <button className="primary-button wide" onClick={onClose}>Continue shopping <ArrowRight size={17} /></button>
+
+            <InvoiceCard d={invoice} />
+
+            <div className="confirm-actions">
+              <button className="secondary-button" onClick={() => window.print()}><Printer size={16} /> Print / save invoice</button>
+              <button className="primary-button" onClick={onClose}>Continue shopping <ArrowRight size={17} /></button>
+            </div>
           </div>
-        ) : (
+        ) : step === "details" ? (
           <>
             <div className="modal-heading">
-              <span className="eyebrow">Quick checkout</span>
-              <h2>Complete your order</h2>
+              <span className="eyebrow">Step 1 of 2</span>
+              <h2>Your details</h2>
               <p>No account needed. Just the essentials to get your product to you.</p>
             </div>
             <div className="checkout-product">
               <img src={product.images[0]} alt="" />
               <div><strong>{product.name}</strong><span>{money(product.price)} each</span></div>
-              <strong>{money(total)}</strong>
+              <strong>{money(subtotal)}</strong>
             </div>
-            <form onSubmit={submit}>
+            <form onSubmit={goToPayment}>
               <div className="field-grid">
                 <label>Full name<input required value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" /></label>
                 <label>Phone number<input required type="tel" inputMode="numeric" pattern="[0-9]{10}" maxLength={10} value={contact} onChange={(event) => setContact(event.target.value.replace(/\D/g, "").slice(0, 10))} placeholder="10-digit mobile number" /></label>
@@ -273,37 +405,47 @@ function PurchaseModal({
                   <span className="field-label">Quantity</span>
                   <div className="stepper"><button type="button" onClick={() => setQuantity(Math.max(1, quantity - 1))}>−</button><strong>{quantity}</strong><button type="button" onClick={() => setQuantity(Math.min(product.stock, quantity + 1))}>+</button></div>
                 </div>
-                <div className="delivery-preview"><span className="field-label">Estimated delivery</span><strong>{formatDate(deliveryDate)}</strong><span>{payment === OrderInputPaymentMethod.UPI ? "Fast-track delivery" : "Standard delivery"}</span></div>
+                <div className="delivery-preview"><span className="field-label">Estimated delivery</span><strong>{formatDate(getDeliveryDate(10))}</strong><span>Pay by UPI to get it by {formatDate(getDeliveryDate(5))}</span></div>
               </div>
-              <span className="field-label">Payment method</span>
-              <div className="payment-options">
-                <button type="button" className={`payment-option ${payment === OrderInputPaymentMethod.COD ? "selected" : ""} ${justSelected === OrderInputPaymentMethod.COD ? "just-selected" : ""}`} onClick={() => selectPayment(OrderInputPaymentMethod.COD)}>
-                  <span className="payment-icon"><Package size={17} /></span><span><strong>Cash on delivery</strong><small>Pay when your order arrives</small></span>{payment === OrderInputPaymentMethod.COD && <Check size={17} className="payment-check" />}
-                </button>
-                <div className="upi-card-wrap">
-                  <div className="upi-offer-strip">
-                    <span className="upi-offer-chip"><Percent size={11} /> 10% off</span>
-                    <span className="upi-offer-chip"><Truck size={11} /> 5-day delivery</span>
-                    <span className="upi-offer-chip"><Gift size={11} /> ₹50 cashback</span>
-                  </div>
-                  <button type="button" className={`payment-option upi-option ${payment === OrderInputPaymentMethod.UPI ? "selected" : ""} ${justSelected === OrderInputPaymentMethod.UPI ? "just-selected" : ""}`} onClick={() => selectPayment(OrderInputPaymentMethod.UPI)}>
-                    <span className="payment-icon upi"><CreditCard size={17} /></span><span><strong>UPI payment</strong><small>Pay now — unlock the offers above</small></span>{payment === OrderInputPaymentMethod.UPI && <Check size={17} className="payment-check" />}
-                  </button>
-                  {justSelected === OrderInputPaymentMethod.UPI && (
-                    <div className="offer-toast"><Sparkles size={13} fill="currentColor" /> Offers unlocked!</div>
-                  )}
-                </div>
-              </div>
-              {upiDiscount > 0 && (
-                <div className="order-savings">
-                  <span>Subtotal</span><strong>{money(subtotal)}</strong>
-                  <span className="savings-line">UPI discount</span><strong className="savings-line">−{money(upiDiscount)}</strong>
-                </div>
-              )}
-              <div className="order-total"><span>Total payable</span><strong>{money(total)}</strong></div>
-              <button className="primary-button wide" disabled={createOrder.isPending}>{createOrder.isPending ? "Securing your order..." : "Confirm order"} <ArrowRight size={17} /><BogoBadge className="buy-button-bogo" /></button>
-              {createOrder.isError && <p className="form-error">{((createOrder.error as { data?: { error?: string } } | null)?.data?.error) ?? "We couldn't place the order. Please check your details and try again."}</p>}
+              <div className="order-total"><span>Subtotal</span><strong>{money(subtotal)}</strong></div>
+              <button className="primary-button wide">Continue to payment <ArrowRight size={17} /></button>
             </form>
+          </>
+        ) : (
+          <>
+            <div className="modal-heading">
+              <span className="eyebrow">Step 2 of 2</span>
+              <h2>Review &amp; pay</h2>
+              <p>Check your invoice, then choose how you'd like to pay.</p>
+            </div>
+
+            <InvoiceCard d={invoice} />
+
+            <span className="field-label pay-label">Payment method</span>
+            <div className="payment-options">
+              <button type="button" className={`payment-option ${payment === OrderInputPaymentMethod.COD ? "selected" : ""} ${justSelected === OrderInputPaymentMethod.COD ? "just-selected" : ""}`} onClick={() => selectPayment(OrderInputPaymentMethod.COD)}>
+                <span className="payment-icon"><Package size={17} /></span><span><strong>Cash on delivery</strong><small>Pay when your order arrives</small></span>{payment === OrderInputPaymentMethod.COD && <Check size={17} className="payment-check" />}
+              </button>
+              <div className="upi-card-wrap">
+                <div className="upi-offer-strip">
+                  <span className="upi-offer-chip"><Percent size={11} /> 1.5% off</span>
+                  <span className="upi-offer-chip"><Truck size={11} /> 5-day delivery</span>
+                  <span className="upi-offer-chip"><Gift size={11} /> ₹50 cashback</span>
+                </div>
+                <button type="button" className={`payment-option upi-option ${payment === OrderInputPaymentMethod.UPI ? "selected" : ""} ${justSelected === OrderInputPaymentMethod.UPI ? "just-selected" : ""}`} onClick={() => selectPayment(OrderInputPaymentMethod.UPI)}>
+                  <span className="payment-icon upi"><CreditCard size={17} /></span><span><strong>UPI payment</strong><small>Pay now — unlock the offers above</small></span>{payment === OrderInputPaymentMethod.UPI && <Check size={17} className="payment-check" />}
+                </button>
+                {justSelected === OrderInputPaymentMethod.UPI && (
+                  <div className="offer-toast"><Sparkles size={13} fill="currentColor" /> Offers unlocked!</div>
+                )}
+              </div>
+            </div>
+
+            <div className="pay-actions">
+              <button type="button" className="secondary-button" onClick={() => { createOrder.reset(); setStep("details"); }} disabled={createOrder.isPending}><ChevronLeft size={16} /> Edit details</button>
+              <button type="button" className="primary-button" onClick={placeOrder} disabled={createOrder.isPending}>{createOrder.isPending ? "Placing your order..." : `Place order · ${money(total)}`} <ArrowRight size={17} /></button>
+            </div>
+            {createOrder.isError && <p className="form-error">{((createOrder.error as { data?: { error?: string } } | null)?.data?.error) ?? "We couldn't place the order. Please check your details and try again."}</p>}
           </>
         )}
       </div>
@@ -312,7 +454,7 @@ function PurchaseModal({
 }
 
 function ProductPage() {
-  const { data: products, isLoading, isError, error } = useListProducts();
+  const { data: products, isLoading, isError } = useListProducts();
   const [isCheckoutOpen, setCheckoutOpen] = useState(false);
   const trackEvent = useTrackAnalyticsEvent();
   const product = products?.[0];
@@ -322,7 +464,7 @@ function ProductPage() {
   }, [product?.id]);
 
   if (isLoading) return <div className="page-loader"><div className="loader-orb" /><span>Preparing your product experience...</span></div>;
-  if (isError || !product) return <div className="empty-state"><Package size={30} /><h2>Product unavailable</h2><p>This product is currently being refreshed. Please check back shortly.</p><pre style={{whiteSpace: "pre-wrap", textAlign: "left", background: "#eee", padding: "10px", marginTop: "10px", fontSize: "11px"}}>{"TEMP DEBUG:\n"}isError: {String(isError)}{"\n"}error: {error ? String((error as any).message || error) : "none"}{"\n"}products: {JSON.stringify(products)}</pre></div>;
+  if (isError || !product) return <div className="empty-state"><Package size={30} /><h2>Product unavailable</h2><p>This product is currently being refreshed. Please check back shortly.</p></div>;
   
   return (
     <div className="storefront">
@@ -488,7 +630,7 @@ function AdminWorkspace({ onLogout }: { onLogout: () => void }) {
     </aside>
     <main className="admin-main">
       <header className="admin-topbar"><button className="icon-button admin-menu" onClick={() => setMobileNav(true)}><Menu size={20} /></button><div><span className="eyebrow">Sunday, Sep 20, 2026</span><h1>{activeTab === "overview" ? "Good morning, operator." : activeTab === "products" ? "Product catalog" : "Order operations"}</h1></div><div className="admin-top-actions"><button className="icon-button" onClick={() => { queryClient.invalidateQueries({ queryKey: getGetAnalyticsSummaryQueryKey() }); queryClient.invalidateQueries({ queryKey: getListOrdersQueryKey() }); }}><RefreshCcw size={17} /></button><span className="live-chip"><span className="online-dot" /> Live</span></div></header>
-      {activeTab === "overview" && <div className="dashboard-content"><div className="stats-grid"><StatCard label="Store visits" value={summary.visits.toLocaleString("en-IN")} icon={Users} trend="+18.4% vs last week" tone="purple" /><StatCard label="Product clicks" value={summary.productClicks.toLocaleString("en-IN")} icon={Eye} trend="+12.8% vs last week" tone="blue" /><StatCard label="Orders placed" value={summary.orders.toLocaleString("en-IN")} icon={ShoppingBag} trend="+9.6% vs last week" tone="orange" /><StatCard label="Gross revenue" value={money(summary.revenue)} icon={BarChart3} trend="+22.1% vs last week" tone="green" /></div><div className="dashboard-grid"><section className="panel analytics-panel"><div className="panel-heading"><div><span className="eyebrow">Performance pulse</span><h2>Traffic is converting.</h2></div><span className="conversion-badge"><Sparkles size={13} /> {summary.conversionRate}% conversion</span></div><div className="chart"><div className="chart-y"><span>2k</span><span>1k</span><span>0</span></div><div className="chart-area">{(summary.daily.length ? summary.daily : [{ label: "Mon", visits: 0, clicks: 0, orders: 0 }]).map((day) => <div className="chart-col" key={day.label}><div className="bar-track"><span className="bar visits" style={{ height: `${Math.min(100, (day.visits / 2200) * 100)}%` }} /><span className="bar clicks" style={{ height: `${Math.min(100, (day.clicks / 1000) * 100)}%` }} /></div><small>{day.label}</small></div>)}</div></div><div className="chart-legend"><span><i className="legend-dot purple" /> Visits</span><span><i className="legend-dot blue" /> Product clicks</span></div></section><section className="panel activity-panel"><div className="panel-heading"><div><span className="eyebrow">Recent movement</span><h2>Latest orders</h2></div><button className="text-button" onClick={() => setActiveTab("orders")}>See all <ArrowRight size={14} /></button></div>{ordersLoading ? <div className="skeleton-lines" /> : orders.slice(0, 4).map((order) => <div className="activity-row" key={order.id}><span className="activity-avatar">{order.customerName.split(" ").map((part) => part[0]).join("").slice(0, 2)}</span><div><strong>{order.customerName}</strong><small>{order.productName} · {formatDate(order.createdAt)}</small></div><div className="activity-total"><strong>{money(order.total)}</strong><span className={`status ${order.status.toLowerCase()}`}>{order.status}</span></div></div>)}</section></div><section className="panel attention-panel"><div className="attention-icon"><Clock3 size={19} /></div><div><strong>{orders.filter((order) => order.status === "Processing").length || 0} orders need attention</strong><span>Keep fulfilment moving so customers receive the promised delivery.</span></div><button className="secondary-button" onClick={() => setActiveTab("orders")}>Review orders <ArrowRight size={15} /></button></section></div>}
+      {activeTab === "overview" && <div className="dashboard-content"><div className="stats-grid"><StatCard label="Store visits" value={summary.visits.toLocaleString("en-IN")} icon={Users} trend={getTrendText(summary.daily, "visits")} tone="purple" /><StatCard label="Product clicks" value={summary.productClicks.toLocaleString("en-IN")} icon={Eye} trend={getTrendText(summary.daily, "clicks")} tone="blue" /><StatCard label="Orders placed" value={summary.orders.toLocaleString("en-IN")} icon={ShoppingBag} trend={getTrendText(summary.daily, "orders")} tone="orange" /><StatCard label="Gross revenue" value={money(summary.revenue)} icon={BarChart3} trend={summary.daily.length ? "Updated from live data" : "No orders yet"} tone="green" /></div><div className="dashboard-grid"><section className="panel analytics-panel"><div className="panel-heading"><div><span className="eyebrow">Performance pulse</span><h2>Traffic is converting.</h2></div><span className="conversion-badge"><Sparkles size={13} /> {summary.conversionRate}% conversion</span></div><div className="chart"><div className="chart-y"><span>2k</span><span>1k</span><span>0</span></div><div className="chart-area">{(summary.daily.length ? summary.daily : [{ label: "Mon", visits: 0, clicks: 0, orders: 0 }]).map((day) => <div className="chart-col" key={day.label}><div className="bar-track"><span className="bar visits" style={{ height: `${Math.min(100, (day.visits / 2200) * 100)}%` }} /><span className="bar clicks" style={{ height: `${Math.min(100, (day.clicks / 1000) * 100)}%` }} /></div><small>{day.label}</small></div>)}</div></div><div className="chart-legend"><span><i className="legend-dot purple" /> Visits</span><span><i className="legend-dot blue" /> Product clicks</span></div></section><section className="panel activity-panel"><div className="panel-heading"><div><span className="eyebrow">Recent movement</span><h2>Latest orders</h2></div><button className="text-button" onClick={() => setActiveTab("orders")}>See all <ArrowRight size={14} /></button></div>{ordersLoading ? <div className="skeleton-lines" /> : orders.slice(0, 4).map((order) => <div className="activity-row" key={order.id}><span className="activity-avatar">{order.customerName.split(" ").map((part) => part[0]).join("").slice(0, 2)}</span><div><strong>{order.customerName}</strong><small>{order.productName} · {formatDate(order.createdAt)}</small></div><div className="activity-total"><strong>{money(order.total)}</strong><span className={`status ${order.status.toLowerCase()}`}>{order.status}</span></div></div>)}</section></div><section className="panel attention-panel"><div className="attention-icon"><Clock3 size={19} /></div><div><strong>{orders.filter((order) => order.status === "Processing").length || 0} orders need attention</strong><span>Keep fulfilment moving so customers receive the promised delivery.</span></div><button className="secondary-button" onClick={() => setActiveTab("orders")}>Review orders <ArrowRight size={15} /></button></section></div>}
        {activeTab === "products" && <div className="dashboard-content"><div className="page-toolbar"><div><p className="section-intro">Keep the storefront fresh and make every listing count.</p></div><button className="primary-button" onClick={() => setEditor("new")}><Plus size={17} /> Add product</button></div><section className="panel table-panel"><div className="table-heading"><div className="search-box"><Search size={16} /><input placeholder="Search products" /></div><span>{products.length} live listing{products.length === 1 ? "" : "s"}</span></div><div className="product-table">{productsLoading ? <div className="skeleton-lines large" /> : products.map((product) => <div className="product-row" key={product.id}><div className="product-media-cell"><img src={product.images[0]} alt="" /><span>{product.images.length} media</span></div><div className="product-cell-main"><strong>{product.name}</strong><span>{product.category}</span></div><div className="product-cell"><span className="cell-label">Price</span><strong>{money(product.price)}</strong></div><div className="product-cell"><span className="cell-label">Stock</span><strong className={product.stock < 10 ? "low-stock" : ""}>{product.stock} units</strong></div><div className="product-cell"><span className="cell-label">Rating</span><strong><Star size={13} fill="currentColor" /> {product.rating}</strong></div><div className="row-actions"><button onClick={() => setEditor(product)} aria-label={`Edit ${product.name}`}><Pencil size={15} /></button><button onClick={() => removeProduct(product)} aria-label={`Delete ${product.name}`}><Trash2 size={15} /></button></div></div>)}</div></section></div>}
       {activeTab === "orders" && <div className="dashboard-content"><div className="page-toolbar"><div><p className="section-intro">Track every order from confirmation to doorstep.</p></div><span className="orders-count"><ShoppingBag size={16} /> {orders.length} recent orders</span></div><section className="panel table-panel"><div className="table-heading"><div><span className="eyebrow">All orders</span><h2>Fulfilment queue</h2></div><div className="filter-chip">All statuses <ChevronRight size={14} /></div></div><div className="orders-table">{ordersLoading ? <div className="skeleton-lines large" /> : orders.map((order) => <div className="order-row" key={order.id}><div className="order-id"><strong>#{order.id}</strong><span>{formatDate(order.createdAt)}</span></div><div className="order-customer"><span className="activity-avatar">{order.customerName.slice(0, 2).toUpperCase()}</span><div><strong>{order.customerName}</strong><span>{order.customerContact}</span></div></div><div className="order-product"><strong>{order.productName}</strong><span>Qty {order.quantity} · {order.paymentMethod}</span></div><div className="order-total-cell"><strong>{money(order.total)}</strong><span>Delivery {formatDate(order.deliveryDate)}</span></div><select value={order.status} onChange={(event) => updateOrder.mutate({ orderId: order.id, data: { status: event.target.value as OrderStatus } }, { onSuccess: () => queryClient.invalidateQueries({ queryKey: getListOrdersQueryKey() }) })} className={`status-select ${order.status.toLowerCase()}`}><option value="Processing">Processing</option><option value="Confirmed">Confirmed</option><option value="Shipped">Shipped</option><option value="Delivered">Delivered</option><option value="Cancelled">Cancelled</option></select></div>)}</div></section></div>}
     </main>
@@ -533,5 +675,15 @@ function Router() {
 }
 
 export default function App() {
+  useEffect(() => {
+    const ping = () => {
+      void fetch("/api/healthz", { cache: "no-store" }).catch(() => undefined);
+    };
+
+    ping();
+    const interval = window.setInterval(ping, 60_000);
+    return () => window.clearInterval(interval);
+  }, []);
+
   return <QueryClientProvider client={queryClient}><TooltipProvider><WouterRouter base={basePath}><Router /></WouterRouter><Toaster /></TooltipProvider></QueryClientProvider>;
 }
